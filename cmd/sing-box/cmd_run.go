@@ -37,7 +37,10 @@ var commandRun = &cobra.Command{
 
 func init() {
 	mainCommand.AddCommand(commandRun)
+	commandRun.Flags().BoolVar(&autoReload, "watch", true, "automatically reload changed configuration files")
 }
+
+var autoReload bool
 
 type OptionsEntry struct {
 	content []byte
@@ -45,7 +48,7 @@ type OptionsEntry struct {
 	options option.Options
 }
 
-func readConfigAt(path string) (*OptionsEntry, error) {
+func readConfigContentAt(path string) (*OptionsEntry, error) {
 	var (
 		configContent []byte
 		err           error
@@ -58,27 +61,60 @@ func readConfigAt(path string) (*OptionsEntry, error) {
 	if err != nil {
 		return nil, E.Cause(err, "read config at ", path)
 	}
-	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, configContent)
+	return &OptionsEntry{content: configContent, path: path}, nil
+}
+
+func decodeConfig(entry *OptionsEntry) (*OptionsEntry, error) {
+	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, entry.content)
 	if err != nil {
-		return nil, E.Cause(err, "decode config at ", path)
+		return nil, E.Cause(err, "decode config at ", entry.path)
 	}
 	return &OptionsEntry{
-		content: configContent,
-		path:    path,
+		content: entry.content,
+		path:    entry.path,
 		options: options,
 	}, nil
 }
 
 func readConfig() ([]*OptionsEntry, error) {
-	var optionsList []*OptionsEntry
-	for _, path := range configPaths {
-		optionsEntry, err := readConfigAt(path)
+	optionsList, err := readConfigContents(configPaths, configDirectories, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeConfigs(optionsList)
+}
+
+func decodeConfigs(entries []*OptionsEntry) ([]*OptionsEntry, error) {
+	optionsList := make([]*OptionsEntry, 0, len(entries))
+	for _, entry := range entries {
+		decoded, err := decodeConfig(entry)
 		if err != nil {
 			return nil, err
 		}
+		optionsList = append(optionsList, decoded)
+	}
+	return optionsList, nil
+}
+
+func readConfigContents(paths, directories []string, stdinEntry *OptionsEntry) ([]*OptionsEntry, error) {
+	var optionsList []*OptionsEntry
+	for _, path := range paths {
+		var optionsEntry *OptionsEntry
+		var err error
+		if path == "stdin" && stdinEntry != nil {
+			optionsEntry = &OptionsEntry{content: stdinEntry.content, path: path}
+		} else {
+			optionsEntry, err = readConfigContentAt(path)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if path == "stdin" {
+			stdinEntry = optionsEntry
+		}
 		optionsList = append(optionsList, optionsEntry)
 	}
-	for _, directory := range configDirectories {
+	for _, directory := range directories {
 		entries, err := os.ReadDir(directory)
 		if err != nil {
 			return nil, E.Cause(err, "read config directory at ", directory)
@@ -87,7 +123,7 @@ func readConfig() ([]*OptionsEntry, error) {
 			if !strings.HasSuffix(entry.Name(), ".json") || entry.IsDir() {
 				continue
 			}
-			optionsEntry, err := readConfigAt(filepath.Join(directory, entry.Name()))
+			optionsEntry, err := readConfigContentAt(filepath.Join(directory, entry.Name()))
 			if err != nil {
 				return nil, err
 			}
@@ -131,6 +167,18 @@ func mergeOptionsList(optionsList []*OptionsEntry) (option.Options, error) {
 }
 
 func create(options option.Options) (*box.Box, context.CancelFunc, error) {
+	instance, cancel, err := newService(options)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = startService(instance, cancel)
+	if err != nil {
+		return nil, nil, err
+	}
+	return instance, cancel, nil
+}
+
+func newService(options option.Options) (*box.Box, context.CancelFunc, error) {
 	if disableColor {
 		if options.Log == nil {
 			options.Log = &option.LogOptions{}
@@ -147,7 +195,10 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 		cancel()
 		return nil, nil, E.Cause(err, "create service")
 	}
+	return instance, cancel, nil
+}
 
+func startService(instance *box.Box, cancel context.CancelFunc) error {
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer func() {
@@ -162,13 +213,13 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 			closeMonitor(startCtx)
 		}
 	}()
-	err = instance.Start()
+	err := instance.Start()
 	finishStart()
 	if err != nil {
 		cancel()
-		return nil, nil, E.Cause(err, "start service")
+		return E.Cause(err, "start service")
 	}
-	return instance, cancel, nil
+	return nil
 }
 
 func run() error {
@@ -187,39 +238,111 @@ func run() error {
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(osSignals)
-	for {
-		instance, cancel, createErr := create(options)
-		if createErr != nil {
-			return createErr
+	var stdinEntry *OptionsEntry
+	for _, entry := range optionsList {
+		if entry.path == "stdin" {
+			stdinEntry = entry
+			break
 		}
-		runtimeDebug.FreeOSMemory()
-		for {
-			osSignal := <-osSignals
-			if osSignal == syscall.SIGHUP {
-				err = check()
-				if err != nil {
-					log.Error(E.Cause(err, "reload service"))
-					continue
-				}
-			}
-			cancel()
-			closeCtx, closed := context.WithCancel(context.Background())
-			go closeMonitor(closeCtx)
-			err = instance.Close()
-			closed()
+	}
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	var configChanges <-chan configChange
+	if autoReload {
+		configChanges = watchConfig(watchCtx, configPaths, configDirectories, stdinEntry, optionsList)
+	}
+	instance, cancel, err := create(options)
+	if err != nil {
+		return err
+	}
+	runtimeDebug.FreeOSMemory()
+	for {
+		var fileChanged bool
+		var entries []*OptionsEntry
+		var readErr error
+		select {
+		case osSignal := <-osSignals:
 			if osSignal != syscall.SIGHUP {
+				err = closeService(instance, cancel)
 				if err != nil {
 					log.Error(E.Cause(err, "sing-box did not closed properly"))
 				}
 				return nil
 			}
-			break
+			entries, readErr = readConfigContents(configPaths, configDirectories, stdinEntry)
+		case change := <-configChanges:
+			fileChanged = true
+			entries, readErr = change.entries, change.err
 		}
-		options, err = readConfigAndMerge()
+		if readErr != nil {
+			log.Error(E.Cause(readErr, "reload service"))
+			continue
+		}
+		if fileChanged && sameConfigContents(entries, optionsList) {
+			continue
+		}
+		entries, err = decodeConfigs(entries)
 		if err != nil {
+			log.Error(E.Cause(err, "reload service"))
+			continue
+		}
+		instance, cancel, err = reloadService(instance, cancel, entries, optionsList, osSignals)
+		if instance == nil {
 			return err
 		}
+		if err != nil {
+			log.Error(E.Cause(err, "reload service"))
+			continue
+		}
+		optionsList = entries
+		log.Info("configuration reloaded")
+		runtimeDebug.FreeOSMemory()
 	}
+}
+
+func reloadService(instance *box.Box, cancel context.CancelFunc, entries, previousEntries []*OptionsEntry, osSignals <-chan os.Signal) (*box.Box, context.CancelFunc, error) {
+	options, err := mergeOptionsList(entries)
+	if err != nil {
+		return instance, cancel, err
+	}
+	candidate, candidateCancel, err := newService(options)
+	if err != nil {
+		return instance, cancel, err
+	}
+	if err = closeService(instance, cancel); err != nil {
+		log.Error(E.Cause(err, "close service for reload"))
+	}
+	err = startService(candidate, candidateCancel)
+	if err == nil {
+		return candidate, candidateCancel, nil
+	}
+	select {
+	case osSignal := <-osSignals:
+		if osSignal != syscall.SIGHUP {
+			return nil, nil, nil
+		}
+	default:
+	}
+	// Decode the saved contents again because creating an instance can mutate options.
+	previousEntries, restoreErr := decodeConfigs(previousEntries)
+	if restoreErr == nil {
+		options, restoreErr = mergeOptionsList(previousEntries)
+	}
+	if restoreErr == nil {
+		instance, cancel, restoreErr = create(options)
+	}
+	if restoreErr != nil {
+		return nil, nil, E.Errors(err, E.Cause(restoreErr, "restore previous configuration"))
+	}
+	return instance, cancel, E.Cause(err, "previous configuration restored")
+}
+
+func closeService(instance *box.Box, cancel context.CancelFunc) error {
+	cancel()
+	closeCtx, closed := context.WithCancel(context.Background())
+	defer closed()
+	go closeMonitor(closeCtx)
+	return instance.Close()
 }
 
 func closeMonitor(ctx context.Context) {

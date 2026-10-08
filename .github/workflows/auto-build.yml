@@ -1,0 +1,125 @@
+name: Auto Build
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest, cgo: '0', tags: release/DEFAULT_BUILD_TAGS_OTHERS }
+          - { goos: linux, goarch: arm64, runner: ubuntu-latest, cgo: '0', tags: release/DEFAULT_BUILD_TAGS_OTHERS }
+          - { goos: windows, goarch: amd64, runner: windows-latest, cgo: '0', tags: release/DEFAULT_BUILD_TAGS_WINDOWS }
+          - { goos: windows, goarch: arm64, runner: windows-latest, cgo: '0', tags: release/DEFAULT_BUILD_TAGS_WINDOWS }
+          - { goos: darwin, goarch: amd64, runner: macos-latest, cgo: '1', tags: release/DEFAULT_BUILD_TAGS_OTHERS }
+          - { goos: darwin, goarch: arm64, runner: macos-latest, cgo: '1', tags: release/DEFAULT_BUILD_TAGS_OTHERS }
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: ${{ matrix.cgo }}
+      GOTOOLCHAIN: local
+      BUILD_TAGS_FILE: ${{ matrix.tags }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Prepare build
+        run: |
+          set -euo pipefail
+          version="$(GOOS="$(go env GOHOSTOS)" GOARCH="$(go env GOHOSTARCH)" CGO_ENABLED=0 go run ./cmd/internal/read_tag)"
+          if [[ -z "$version" || "$version" == "unknown" ]]; then
+            version="dev-${GITHUB_SHA:0:7}"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "BUILD_TAGS=$(tr -d '\r\n' < "$BUILD_TAGS_FILE")" >> "$GITHUB_ENV"
+          echo "LDFLAGS_SHARED=$(tr -d '\r\n' < release/LDFLAGS)" >> "$GITHUB_ENV"
+          echo "PACKAGE_NAME=sing-box-${GOOS}-${GOARCH}-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Build binary
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$PACKAGE_NAME"
+          cp LICENSE "dist/$PACKAGE_NAME/"
+          binary="dist/$PACKAGE_NAME/sing-box"
+          if [[ "$GOOS" == "windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          go build -trimpath -tags "$BUILD_TAGS" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION $LDFLAGS_SHARED -s -w -buildid=" \
+            -o "$binary" ./cmd/sing-box
+          echo "BINARY_PATH=$binary" >> "$GITHUB_ENV"
+
+      - name: Test native binary
+        run: |
+          set -euo pipefail
+          if [[ "$(go env GOHOSTOS)" == "$GOOS" && "$(go env GOHOSTARCH)" == "$GOARCH" ]]; then
+            go test -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./cmd/sing-box -count=1 -timeout=120s
+            "$BINARY_PATH" version
+            printf '%s\n' '{"experimental":{"v2ray_api":{"listen":"127.0.0.1:0","stats":{"enabled":true}}}}' |
+              "$BINARY_PATH" check -c stdin
+          fi
+
+      - name: Package Windows binary
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $cronetModule = "github.com/sagernet/cronet-go/lib/windows_$env:GOARCH"
+          go mod download $cronetModule
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download Cronet library' }
+          $cronetDirectory = go list -m -f '{{.Dir}}' $cronetModule
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to locate Cronet library' }
+          Copy-Item -LiteralPath "$cronetDirectory/libcronet.dll" -Destination "dist/$env:PACKAGE_NAME/"
+          Copy-Item -LiteralPath "$cronetDirectory/LICENSE" -Destination "dist/$env:PACKAGE_NAME/LICENSE.cronet"
+          $archivePath = "dist/$env:PACKAGE_NAME.zip"
+          Compress-Archive -Path "dist/$env:PACKAGE_NAME" -DestinationPath $archivePath
+          $checksum = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+          "$checksum  $env:PACKAGE_NAME.zip" | Set-Content -LiteralPath "$archivePath.sha256" -Encoding ascii
+
+      - name: Package Unix binary
+        if: matrix.goos != 'windows'
+        run: |
+          set -euo pipefail
+          tar -C dist -czf "dist/$PACKAGE_NAME.tar.gz" "$PACKAGE_NAME"
+          cd dist
+          shasum -a 256 "$PACKAGE_NAME.tar.gz" > "$PACKAGE_NAME.tar.gz.sha256"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

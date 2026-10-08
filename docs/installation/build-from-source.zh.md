@@ -47,6 +47,18 @@ or
 go build -tags "tag_a tag_b" ./cmd/sing-box
 ```
 
+不指定任何构建标记时，也会默认包含 V2Ray API 支持。`with_v2ray_api` 标记仍兼容已有构建命令。若要排除 V2Ray API 支持，使用 `-tags without_v2ray_api`；此标记优先于 `with_v2ray_api`。
+
+## GitHub Actions 自动构建
+
+`Auto Build` 工作流在推送分支、推送 `v*` 标签、提交 PR 时自动运行，也可在 Actions 页面手动运行。
+它构建 Linux、Windows、macOS 的 amd64 和 arm64 命令行程序，包含默认的 V2Ray API 支持和配置文件自动重载。
+完成后可在运行页面的 Artifacts 下载压缩包和 SHA256 校验文件，产物保留 14 天。
+
+Linux 和 macOS 使用 `release/DEFAULT_BUILD_TAGS_OTHERS`，不包含 Naive 出站；macOS 保留 CGO 支持。
+Windows 使用 `release/DEFAULT_BUILD_TAGS_WINDOWS`，压缩包包含 Naive 出站所需的 `libcronet.dll`。
+工作流无需额外 Secrets。原 `Build` 发布工作流保留手动触发。
+
 ## :material-folder-settings: 构建标记
 
 | 构建标记                               | 默认启动              | 说明                                                                                                                                                                                                                                                                                                                             |
@@ -58,7 +70,8 @@ go build -tags "tag_a tag_b" ./cmd/sing-box
 | `with_utls`                        | :material-check:  | Build with [uTLS](https://github.com/refraction-networking/utls) support for TLS outbound, see [TLS](/zh/configuration/shared/tls#utls).                                                                                                                                                                                          |
 | `with_acme`                        | :material-check:  | Build with ACME TLS certificate issuer support, see [TLS](/zh/configuration/shared/tls/).                                                                                                                                                                                                                                         |
 | `with_clash_api`                   | :material-check:  | Build with Clash API support, see [Experimental](/zh/configuration/experimental#clash-api-fields).                                                                                                                                                                                                                                |
-| `with_v2ray_api`                   | :material-close:️ | Build with V2Ray API support, see [Experimental](/zh/configuration/experimental#v2ray-api-fields).                                                                                                                                                                                                                                |
+| `with_v2ray_api`                   | :material-check:  | 构建 V2Ray API 支持，参阅 [Experimental](/zh/configuration/experimental#v2ray-api-fields)。默认包含，包括不指定构建标记的构建。 |
+| `without_v2ray_api`                | :material-close:  | 排除 V2Ray API 支持，优先于 `with_v2ray_api`。 |
 | `with_gvisor`                      | :material-close:  | 构建 gVisor 支持，已弃用的 `gvisor` / `mixed` [Tun 栈](/zh/configuration/inbound/tun#stack) 需要。                                                                                                                                                                   |
 | `with_embedded_tor` (CGO required) | :material-close:️ | Build with embedded Tor support, see [Tor outbound](/zh/configuration/outbound/tor/).                                                                                                                                                                                                                                             |
 | `with_tailscale`                   | :material-check:  | 构建 Tailscale 支持，参阅 [Tailscale 端点](/zh/configuration/endpoint/tailscale)。                                                                                                                                                                                                                                                         |

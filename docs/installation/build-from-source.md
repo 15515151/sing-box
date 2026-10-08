@@ -43,6 +43,18 @@ or
 go build -tags "tag_a tag_b" ./cmd/sing-box
 ```
 
+V2Ray API support is included even when building without any tags. The `with_v2ray_api` tag remains compatible with existing build commands. To exclude V2Ray API support, use `-tags without_v2ray_api`; this takes precedence over `with_v2ray_api`.
+
+## GitHub Actions automatic builds
+
+The `Auto Build` workflow runs on branch pushes, `v*` tag pushes and pull requests, and can also be started manually from Actions.
+It builds amd64 and arm64 command-line binaries for Linux, Windows and macOS, including V2Ray API support and automatic configuration reload.
+Download archives and SHA256 checksum files from Artifacts on the workflow run page. Artifacts are retained for 14 days.
+
+Linux and macOS use `release/DEFAULT_BUILD_TAGS_OTHERS`, without Naive outbound; macOS retains CGO support.
+Windows uses `release/DEFAULT_BUILD_TAGS_WINDOWS` and packages the `libcronet.dll` required by Naive outbound.
+No additional Secrets are required. The original `Build` release workflow remains available for manual runs.
+
 ## :material-folder-settings: Build Tags
 
 | Build Tag                          | Enabled by default   | Description                                                                                                                                                                                                                                                                                                                    |
@@ -54,7 +66,8 @@ go build -tags "tag_a tag_b" ./cmd/sing-box
 | `with_utls`                        | :material-check:     | Build with [uTLS](https://github.com/refraction-networking/utls) support for TLS outbound, see [TLS](/configuration/shared/tls#utls).                                                                                                                                                                                          |
 | `with_acme`                        | :material-check:     | Build with ACME TLS certificate issuer support, see [TLS](/configuration/shared/tls/).                                                                                                                                                                                                                                         |
 | `with_clash_api`                   | :material-check:     | Build with Clash API support, see [Experimental](/configuration/experimental#clash-api-fields).                                                                                                                                                                                                                                |
-| `with_v2ray_api`                   | :material-close:️    | Build with V2Ray API support, see [Experimental](/configuration/experimental#v2ray-api-fields).                                                                                                                                                                                                                                |
+| `with_v2ray_api`                   | :material-check:     | Build with V2Ray API support, see [Experimental](/configuration/experimental#v2ray-api-fields). Included by default, including builds without tags. |
+| `without_v2ray_api`                | :material-close:     | Exclude V2Ray API support. Overrides `with_v2ray_api`. |
 | `with_gvisor`                      | :material-close:     | Build with gVisor support, required by the deprecated `gvisor` / `mixed` [Tun stacks](/configuration/inbound/tun#stack).                                                                                                                                                                   |
 | `with_embedded_tor` (CGO required) | :material-close:️    | Build with embedded Tor support, see [Tor outbound](/configuration/outbound/tor/).                                                                                                                                                                                                                                             |
 | `with_tailscale`                   | :material-check:     | Build with Tailscale support, see [Tailscale endpoint](/configuration/endpoint/tailscale).                                                                                                                                                                                                                                     |

@@ -1,6 +1,6 @@
 !!! quote ""
 
-    默认安装不包含 V2Ray API，参阅 [安装](/zh/installation/build-from-source/#构建标记)。
+    默认构建包含 V2Ray API。使用 `without_v2ray_api` 构建标记可排除它，参阅 [安装](/zh/installation/build-from-source/#构建标记)。
 
 ### 结构
 

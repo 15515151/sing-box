@@ -1,6 +1,6 @@
 !!! quote ""
 
-    V2Ray API is not included by default, see [Installation](/installation/build-from-source/#build-tags).
+    V2Ray API is included by default. Builds using `without_v2ray_api` exclude it; see [Installation](/installation/build-from-source/#build-tags).
 
 ### Structure
 
